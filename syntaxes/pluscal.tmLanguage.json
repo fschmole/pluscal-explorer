@@ -1,0 +1,137 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PlusCal",
+  "scopeName": "source.pluscal",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#algorithm" },
+    { "include": "#keywords" },
+    { "include": "#operators" },
+    { "include": "#constants" },
+    { "include": "#labels" },
+    { "include": "#tla-operators" },
+    { "include": "#module" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.pluscal",
+          "match": "\\\\\\*.*$"
+        },
+        {
+          "name": "comment.block.pluscal",
+          "begin": "\\(\\*",
+          "end": "\\*\\)",
+          "patterns": [
+            { "include": "#comments" }
+          ]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.pluscal",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.pluscal",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "algorithm": {
+      "patterns": [
+        {
+          "name": "keyword.control.algorithm.pluscal",
+          "match": "\\b(--fair\\s+algorithm|--algorithm|fair\\s+process|process|procedure)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.pluscal",
+          "match": "\\b(if|then|else|elsif|while|do|either|or|with|await|when|skip|goto|call|return|print|assert|macro|define|variables?|begin|end)\\b"
+        },
+        {
+          "name": "keyword.other.pluscal",
+          "match": "\\b(self|TRUE|FALSE|BOOLEAN|CHOOSE|CASE|OTHER|LET|IN)\\b"
+        },
+        {
+          "name": "storage.type.pluscal",
+          "match": "\\b(CONSTANT[S]?|VARIABLE[S]?|ASSUME|AXIOM|THEOREM|LEMMA|INSTANCE|LOCAL|EXTENDS|MODULE)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pluscal",
+          "match": ":=|\\|->|<-|=>|->|\\\\in|\\\\notin|\\\\union|\\\\intersect|\\\\subseteq|\\\\cup|\\\\cap|\\\\X|\\\\div|\\\\o|\\\\circ|\\\\leq|\\\\geq|\\\\E|\\\\A|\\\\EE|\\\\AA"
+        },
+        {
+          "name": "keyword.operator.logic.pluscal",
+          "match": "/\\\\|\\\\/|~|<>|\\[\\]|=>|\\|\\->"
+        },
+        {
+          "name": "keyword.operator.comparison.pluscal",
+          "match": ">=|<=|#|/=|=|<|>"
+        },
+        {
+          "name": "keyword.operator.arithmetic.pluscal",
+          "match": "\\+|-|\\*|%|\\.\\.|\\.\\."
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.numeric.pluscal",
+          "match": "\\b[0-9]+\\b"
+        },
+        {
+          "name": "constant.language.pluscal",
+          "match": "\\b(TRUE|FALSE)\\b"
+        }
+      ]
+    },
+    "labels": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.label.pluscal",
+          "match": "^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*:"
+        }
+      ]
+    },
+    "tla-operators": {
+      "patterns": [
+        {
+          "name": "support.function.tla.pluscal",
+          "match": "\\b(Append|Head|Tail|Len|SubSeq|SelectSeq|Seq|DOMAIN|SUBSET|UNION|Cardinality|IsFiniteSet|Nat|Int|ToString|Print|PrintT|Assert|JavaTime|TLCGet|TLCSet|TLCEval)\\b"
+        },
+        {
+          "name": "keyword.operator.temporal.pluscal",
+          "match": "\\[\\]|<>|~>|\\-\\+\\->"
+        }
+      ]
+    },
+    "module": {
+      "patterns": [
+        {
+          "name": "keyword.other.module-delimiter.pluscal",
+          "match": "^----+\\s*MODULE\\s+\\w+\\s*----+$"
+        },
+        {
+          "name": "keyword.other.module-end.pluscal",
+          "match": "^====+$"
+        }
+      ]
+    }
+  }
+}

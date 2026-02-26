@@ -1,0 +1,59 @@
+{
+  "module": "mesi_coherence",
+  "pcal":   "mesi_coherence.pcal",
+  "title":  "MESI Cache Coherence Protocol",
+
+  "constants": {
+    "Operation":   ["Read", "Write"],
+    "InitState":   ["M", "E", "S", "I"],
+    "RemoteState": ["M", "E", "S", "I"]
+  },
+
+  "invalid": [
+    { "InitState": "M", "RemoteState": "M" },
+    { "InitState": "M", "RemoteState": "E" },
+    { "InitState": "M", "RemoteState": "S" },
+    { "InitState": "E", "RemoteState": "M" },
+    { "InitState": "E", "RemoteState": "E" },
+    { "InitState": "E", "RemoteState": "S" },
+    { "InitState": "S", "RemoteState": "M" },
+    { "InitState": "S", "RemoteState": "E" }
+  ],
+
+  "invariants": ["MESICoherence"],
+  "properties": ["RequestCompletes"],
+
+  "traceVariable": "trace",
+  "doneVariable":  "done",
+
+  "participants": ["Proc1", "Bus", "Proc2", "Memory"],
+
+  "channels": ["busReq", "busResp", "snoop", "snoopResp", "memReq", "memResp", "internal"],
+  "channelColors": {
+    "busReq":    { "stroke": "#2563eb", "label": "#1d4ed8" },
+    "busResp":   { "stroke": "#16a34a", "label": "#15803d" },
+    "snoop":     { "stroke": "#dc2626", "label": "#b91c1c" },
+    "snoopResp": { "stroke": "#9333ea", "label": "#7e22ce" },
+    "memReq":    { "stroke": "#ea580c", "label": "#c2410c" },
+    "memResp":   { "stroke": "#0891b2", "label": "#0e7490" },
+    "internal":  { "stroke": "#6b7280", "label": "#4b5563" }
+  },
+  "abbreviations": {
+    "busReq":    "Bus Request",
+    "busResp":   "Bus Response",
+    "snoop":     "Snoop",
+    "snoopResp": "Snoop Response",
+    "memReq":    "Memory Request",
+    "memResp":   "Memory Response",
+    "internal":  "Internal"
+  },
+
+  "plantUmlServer": "",
+  "tlcServer": "http://127.0.0.1:18080",
+
+  "warmup": {
+    "Operation":   "Read",
+    "InitState":   "I",
+    "RemoteState": "S"
+  }
+}

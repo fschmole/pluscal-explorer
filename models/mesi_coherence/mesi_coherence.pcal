@@ -1,0 +1,304 @@
+\* =========================================================================
+\*  MESI Cache Coherence Protocol -- PlusCal Model
+\*
+\*  A textbook MESI snoopy bus protocol with 2 processors, shared bus, and
+\*  memory controller.  Each processor has a single cache line that tracks
+\*  state {M, E, S, I}.  One processor issues a read or write; the bus
+\*  serialises the request and the remote processor snoops.
+\*
+\*  Model parameters (MODEL CONSTANTS):
+\*    Operation   in {"Read", "Write"}
+\*    InitState   in {"M", "E", "S", "I"}   -- Proc1 initial cache state
+\*    RemoteState in {"M", "E", "S", "I"}   -- Proc2 initial cache state
+\*
+\*  Invariant: Coherence (see bottom)
+\*  Liveness:  RequestCompletes (every request eventually finishes)
+\* =========================================================================
+
+---- MODULE mesi_coherence ----
+EXTENDS Naturals, Sequences, FiniteSets, TLC
+
+CONSTANTS Operation,   \* "Read" | "Write"
+          InitState,   \* "M" | "E" | "S" | "I"
+          RemoteState  \* "M" | "E" | "S" | "I"
+
+(* --fair algorithm MESI_Protocol {
+
+    \* ---------------------------------------------------------------
+    \*  Global variables
+    \* ---------------------------------------------------------------
+    variables
+        \* Cache states for each processor
+        cache1 = InitState,              \* Proc1 cache line state
+        cache2 = RemoteState,            \* Proc2 cache line state
+
+        \* Simulated "data" -- value held in each copy (1 = valid, 0 = none)
+        data1  = IF InitState  \in {"M", "E", "S"} THEN 1 ELSE 0,
+        data2  = IF RemoteState \in {"M", "E", "S"} THEN 1 ELSE 0,
+        memData = 1,
+
+        \* Bus channels (request -> snoop -> response)
+        busReq     = <<>>,   \* Bus request channel
+        snoopReq   = <<>>,   \* Snoop request forwarded to remote
+        snoopResp  = <<>>,   \* Snoop response back to bus
+        busResp    = <<>>,   \* Bus response back to requester
+        memReq     = <<>>,   \* Memory request channel
+        memResp    = <<>>,   \* Memory response channel
+
+        \* Trace -- the sequence of observable events for visualization
+        trace = <<>>,
+
+        \* Flow control
+        done = FALSE;
+
+    \* ---------------------------------------------------------------
+    \*  Helper: append an event to trace
+    \* ---------------------------------------------------------------
+    define {
+        States == {"M", "E", "S", "I"}
+
+        \* Two caches cannot both be Modified
+        NoDoubleModified == ~(cache1 = "M" /\ cache2 = "M")
+
+        \* M and E are exclusive -- if one is M or E, the other must be I
+        ExclusiveRule == /\ (cache1 \in {"M", "E"} => cache2 = "I")
+                         /\ (cache2 \in {"M", "E"} => cache1 = "I")
+
+        \* If both have data, values must agree (single-writer / multi-reader)
+        DataCoherence ==
+            IF cache1 \in {"M", "E", "S"} /\ cache2 \in {"M", "E", "S"}
+            THEN data1 = data2
+            ELSE TRUE
+
+        \* Combined coherence invariant
+        Coherence == ExclusiveRule /\ DataCoherence
+    }
+
+    \* ---------------------------------------------------------------
+    \*  Proc1 -- Requesting processor
+    \* ---------------------------------------------------------------
+    process (Proc1 = "proc1")
+    {
+        p1_issue:
+            if (Operation = "Read") {
+                trace := Append(trace, [src |-> "Proc1", dst |-> "Bus",
+                                        msg |-> "BusRd", ch |-> "busReq", data |-> ""]);
+                busReq := Append(busReq, [type |-> "BusRd", from |-> "proc1"]);
+            } else {
+                \* Write
+                if (cache1 = "M") {
+                    \* Silent write -- already Modified, no bus transaction needed
+                    trace := Append(trace, [src |-> "Proc1", dst |-> "Proc1",
+                                            msg |-> "SilentWrite", ch |-> "internal", data |-> "hit M"]);
+                    data1 := 10;  \* new value
+                    goto p1_done;
+                } else if (cache1 = "E") {
+                    \* Silent upgrade E->M
+                    trace := Append(trace, [src |-> "Proc1", dst |-> "Proc1",
+                                            msg |-> "SilentUpgrade", ch |-> "internal", data |-> "E->M"]);
+                    cache1 := "M";
+                    data1  := 10;
+                    goto p1_done;
+                } else if (cache1 = "S") {
+                    \* Need BusUpgr to invalidate other sharers
+                    trace := Append(trace, [src |-> "Proc1", dst |-> "Bus",
+                                            msg |-> "BusUpgr", ch |-> "busReq", data |-> ""]);
+                    busReq := Append(busReq, [type |-> "BusUpgr", from |-> "proc1"]);
+                } else {
+                    \* Invalid -- need BusRdX (read-exclusive)
+                    trace := Append(trace, [src |-> "Proc1", dst |-> "Bus",
+                                            msg |-> "BusRdX", ch |-> "busReq", data |-> ""]);
+                    busReq := Append(busReq, [type |-> "BusRdX", from |-> "proc1"]);
+                };
+            };
+
+        p1_wait:
+            await Len(busResp) > 0;
+            trace := Append(trace, [src |-> "Bus", dst |-> "Proc1",
+                                    msg |-> "Response", ch |-> "busResp",
+                                    data |-> Head(busResp).result]);
+            \* Update cache state from response
+            cache1 := Head(busResp).newState;
+            data1  := Head(busResp).value;
+            busResp := Tail(busResp);
+
+        p1_done:
+            done := TRUE;
+            trace := Append(trace, [src |-> "Proc1", dst |-> "Proc1",
+                                    msg |-> "Complete", ch |-> "internal",
+                                    data |-> cache1 \o "," \o cache2]);
+    }
+
+    \* ---------------------------------------------------------------
+    \*  Bus -- Serialises requests, issues snoops, coordinates memory
+    \* ---------------------------------------------------------------
+    process (Bus = "bus")
+    {
+        bus_wait:
+            await Len(busReq) > 0;
+
+        bus_snoop:
+            \* Forward snoop to remote processor
+            trace := Append(trace, [src |-> "Bus", dst |-> "Proc2",
+                                    msg |-> "Snoop:" \o Head(busReq).type,
+                                    ch |-> "snoop", data |-> ""]);
+            snoopReq := Append(snoopReq, Head(busReq));
+
+        bus_collect:
+            \* Wait for snoop response
+            await Len(snoopResp) > 0;
+
+            if (Head(snoopResp).hit) {
+                \* Remote cache supplied data -- no memory needed
+                if (Head(busReq).type = "BusRd") {
+                    \* Read hit: requester gets Shared
+                    busResp := Append(busResp, [
+                        newState |-> "S",
+                        value    |-> Head(snoopResp).value,
+                        result   |-> "SnoopHit"
+                    ]);
+                } else if (Head(busReq).type = "BusRdX") {
+                    \* Read-exclusive hit: requester gets Modified
+                    busResp := Append(busResp, [
+                        newState |-> "M",
+                        value    |-> Head(snoopResp).value,
+                        result   |-> "SnoopHit"
+                    ]);
+                } else {
+                    \* BusUpgr: requester upgrades to Modified (already has data)
+                    busResp := Append(busResp, [
+                        newState |-> "M",
+                        value    |-> data1,  \* keep existing data
+                        result   |-> "Upgraded"
+                    ]);
+                };
+                \* If remote was Modified, write-back to memory
+                if (Head(snoopResp).wasModified) {
+                    trace := Append(trace, [src |-> "Bus", dst |-> "Memory",
+                                            msg |-> "WriteBack",
+                                            ch |-> "memReq", data |-> ""]);
+                    memData := Head(snoopResp).value;
+                };
+                snoopResp := Tail(snoopResp);
+                busReq    := Tail(busReq);
+            } else {
+                \* Remote cache miss -- need memory
+                snoopResp := Tail(snoopResp);
+                trace := Append(trace, [src |-> "Bus", dst |-> "Memory",
+                                        msg |-> "MemRd", ch |-> "memReq", data |-> ""]);
+                memReq := Append(memReq, Head(busReq));
+                goto bus_mem_wait;
+            };
+
+        bus_hit_done:
+            goto bus_end;
+
+        bus_mem_wait:
+            await Len(memResp) > 0;
+
+            if (Head(busReq).type = "BusRd") {
+                \* Read from memory: line is Exclusive (no other sharers)
+                busResp := Append(busResp, [
+                    newState |-> "E",
+                    value    |-> Head(memResp).value,
+                    result   |-> "MemFetch"
+                ]);
+            } else if (Head(busReq).type = "BusRdX") {
+                \* Read-exclusive from memory: line is Modified
+                busResp := Append(busResp, [
+                    newState |-> "M",
+                    value    |-> Head(memResp).value,
+                    result   |-> "MemFetch"
+                ]);
+            } else {
+                \* BusUpgr should not reach memory (remote was Invalid)
+                \* but in degenerate case, just ack
+                busResp := Append(busResp, [
+                    newState |-> "M",
+                    value    |-> data1,
+                    result   |-> "Upgraded"
+                ]);
+            };
+            memResp := Tail(memResp);
+            busReq  := Tail(busReq);
+
+        bus_end:
+            skip;
+    }
+
+    \* ---------------------------------------------------------------
+    \*  Proc2 -- Remote / snooping processor
+    \* ---------------------------------------------------------------
+    process (Proc2 = "proc2")
+    {
+        p2_snoop:
+            await Len(snoopReq) > 0;
+
+            if (cache2 \in {"M", "E", "S"}) {
+                \* Cache hit on snoop
+                trace := Append(trace, [src |-> "Proc2", dst |-> "Bus",
+                                        msg |-> "SnoopResp",
+                                        ch |-> "snoopResp", data |-> "hit:" \o cache2]);
+                if (Head(snoopReq).type = "BusRd") {
+                    \* BusRd snoop: transition to Shared
+                    snoopResp := Append(snoopResp, [
+                        hit         |-> TRUE,
+                        value       |-> data2,
+                        wasModified |-> (cache2 = "M")
+                    ]);
+                    cache2 := "S";
+                } else {
+                    \* BusRdX or BusUpgr snoop: transition to Invalid
+                    snoopResp := Append(snoopResp, [
+                        hit         |-> TRUE,
+                        value       |-> data2,
+                        wasModified |-> (cache2 = "M")
+                    ]);
+                    cache2 := "I";
+                    data2  := 0;
+                };
+            } else {
+                \* Cache miss on snoop -- respond with miss
+                trace := Append(trace, [src |-> "Proc2", dst |-> "Bus",
+                                        msg |-> "SnoopResp",
+                                        ch |-> "snoopResp", data |-> "miss"]);
+                snoopResp := Append(snoopResp, [
+                    hit         |-> FALSE,
+                    value       |-> 0,
+                    wasModified |-> FALSE
+                ]);
+            };
+            snoopReq := Tail(snoopReq);
+    }
+
+    \* ---------------------------------------------------------------
+    \*  Memory controller
+    \* ---------------------------------------------------------------
+    process (Mem = "memory")
+    {
+        mem_serve:
+            await Len(memReq) > 0;
+
+            trace := Append(trace, [src |-> "Memory", dst |-> "Bus",
+                                    msg |-> "MemResp",
+                                    ch |-> "memResp", data |-> ""]);
+            memResp := Append(memResp, [value |-> memData]);
+            memReq  := Tail(memReq);
+    }
+}
+*)
+
+\* BEGIN TRANSLATION
+\* END TRANSLATION
+
+\* ---------------------------------------------------------------
+\*  Properties
+\* ---------------------------------------------------------------
+
+\* Invariant: MESI coherence rules
+MESICoherence == Coherence
+
+\* Liveness: every request eventually completes
+RequestCompletes == <>(done = TRUE)
+
+====

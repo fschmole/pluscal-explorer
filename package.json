@@ -1,0 +1,146 @@
+{
+  "name": "pluscal-explorer",
+  "displayName": "PlusCal Explorer",
+  "description": "PlusCal IDE with TLC model checking, trace visualization, and parameter sweep",
+  "version": "0.0.1",
+  "publisher": "pluscal-explorer",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Visualization",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:pluscal"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pluscal",
+        "aliases": ["PlusCal", "pluscal"],
+        "extensions": [".pcal"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pluscal",
+        "scopeName": "source.pluscal",
+        "path": "./syntaxes/pluscal.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "pluscalExplorer.translate",
+        "title": "PlusCal: Translate to TLA+",
+        "icon": "$(play)"
+      },
+      {
+        "command": "pluscalExplorer.check",
+        "title": "PlusCal: Run TLC Model Checker",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "pluscalExplorer.showDiagram",
+        "title": "PlusCal: Show Sequence Diagram"
+      },
+      {
+        "command": "pluscalExplorer.sweep",
+        "title": "PlusCal: Run Parameter Sweep"
+      },
+      {
+        "command": "pluscalExplorer.openModel",
+        "title": "PlusCal: Open Example Model"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "pluscalExplorer.translate",
+        "key": "ctrl+shift+t",
+        "when": "editorLangId == pluscal"
+      },
+      {
+        "command": "pluscalExplorer.check",
+        "key": "ctrl+shift+r",
+        "when": "editorLangId == pluscal"
+      }
+    ],
+    "configuration": {
+      "title": "PlusCal Explorer",
+      "properties": {
+        "pluscalExplorer.tla2toolsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to tla2tools.jar. Auto-detected if empty."
+        },
+        "pluscalExplorer.javaPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Java executable. Auto-detected via JAVA_HOME or PATH."
+        },
+        "pluscalExplorer.jvmArgs": {
+          "type": "array",
+          "default": ["-XX:TieredStopAtLevel=1", "-Xms32m", "-Xmx256m", "-XX:+UseParallelGC"],
+          "description": "JVM arguments passed to TLC."
+        },
+        "pluscalExplorer.tlcWorkers": {
+          "type": "string",
+          "default": "auto",
+          "description": "Number of TLC worker threads (or 'auto')."
+        },
+        "pluscalExplorer.translateOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Translate PlusCal to TLA+ on save."
+        },
+        "pluscalExplorer.checkOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run TLC automatically after successful translation."
+        },
+        "pluscalExplorer.tlcTimeout": {
+          "type": "number",
+          "default": 60,
+          "description": "TLC timeout in seconds."
+        },
+        "pluscalExplorer.diagramTheme": {
+          "type": "string",
+          "default": "auto",
+          "enum": ["auto", "light", "dark"],
+          "description": "Sequence diagram color theme."
+        },
+        "pluscalExplorer.plantUmlServer": {
+          "type": "string",
+          "default": "",
+          "description": "PlantUML server URL for SVG rendering (e.g. http://localhost:8080 or https://plantuml.example.com). Leave empty to show raw PlantUML text."
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "pluscalExplorer.check",
+          "when": "editorLangId == pluscal",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.50.0"
+  }
+}

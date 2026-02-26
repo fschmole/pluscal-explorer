@@ -1,0 +1,10 @@
+out/
+node_modules/
+.vscode-test/
+*.vsix
+*.bin
+*.old
+states/
+distrib/
+tmp/
+__pycache__/
