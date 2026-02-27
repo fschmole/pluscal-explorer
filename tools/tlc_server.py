@@ -10,7 +10,7 @@ Model-specific knowledge comes from `*.explorer.json` config files
 Endpoints:
     GET  /api/health        → {"status":"ok", "tlc_version":"...", "model":"..."}
     GET  /api/params        → {"constants":{name:[vals],...}, "skip":[...], "participants":[...]}
-    POST /api/trace         → body: {name:value,...}  resp: {parameters, participants, trace, steps, channelStyles, puml_text, puml_svg, ...}
+    POST /api/trace         → body: {name:value,...}  resp: {parameters, puml_text, elapsed_ms}
     POST /api/trace-custom  → body: {pcal_source, ...constants...}  resp: same + custom:true
     POST /api/stategraph    → body: {pcal_source}  resp: {dot:"...", elapsed_ms}
 
@@ -36,6 +36,7 @@ import time
 from functools import lru_cache
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+from socketserver import ThreadingMixIn
 
 # ── Import reusable functions from tlc_sweep.py ───────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -43,8 +44,6 @@ import tlc_sweep  # noqa: E402
 
 DEFAULT_PORT = 18080
 BIND_HOST = "127.0.0.1"
-PLANTUML_JAR = Path(__file__).resolve().parent / "plantuml.jar"
-
 # Reuse JVM flags and platform guards from tlc_sweep (single source of truth)
 _JVM_FAST = tlc_sweep._JVM_FAST
 _NOWIN    = tlc_sweep._NOWIN
@@ -75,40 +74,41 @@ def detect_tlc_version() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# PlantUML SVG rendering
+# Error summary extraction
 # ═══════════════════════════════════════════════════════════════════════
 
-def _clean_svg(content: str) -> str:
-    """Strip XML/DOCTYPE for safe innerHTML embedding."""
-    import re as _re
-    content = _re.sub(r"<\?xml[^?]*\?>\s*", "", content)
-    content = _re.sub(r"<!DOCTYPE[^>]*>\s*", "", content)
-    return content.strip()
+def _extract_error_summary(tlc_output: str) -> str:
+    """Extract a short error description from TLC output for the diagram banner.
 
-
-def _render_puml_svg(puml_text: str) -> str:
-    """Render PlantUML text to SVG via plantuml.jar -pipe.
-
-    Returns cleaned SVG string, or empty string on failure.
+    Looks for common TLC error patterns:
+      - "Temporal properties were violated."
+      - "Invariant ... is violated."
+      - "Deadlock reached."
+      - "State N: Stuttering"
+    Returns a one-line summary.
     """
-    if not PLANTUML_JAR.exists():
-        return ""
-    try:
-        result = subprocess.run(
-            [tlc_sweep.JAVA, "-jar", str(PLANTUML_JAR),
-             "-tsvg", "-pipe", "-nometadata"],
-            input=puml_text, capture_output=True, text=True,
-            timeout=30, **_NOWIN,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return _clean_svg(result.stdout)
-        return ""
-    except Exception:
-        return ""
+    import re as _re
+    if "Temporal properties were violated" in tlc_output:
+        # Check for stuttering
+        m = _re.search(r'State (\d+): Stuttering', tlc_output)
+        if m:
+            return f"Temporal property violated (stuttering at state {m.group(1)})"
+        return "Temporal property violated"
+    m = _re.search(r'Invariant\s+(\S+)\s+is violated', tlc_output)
+    if m:
+        return f"Invariant {m.group(1)} violated"
+    if "Deadlock reached" in tlc_output:
+        return "Deadlock reached"
+    m = _re.search(r'Error:\s*(.+)', tlc_output)
+    if m:
+        return m.group(1).strip()[:120]
+    return "TLC model checking failed"
 
 
-def _build_trace_result(combo_d: dict, all_traces, elapsed_ms: int) -> dict:
-    """Build a complete response dict with PlantUML text and SVG.
+# ═══════════════════════════════════════════════════════════════════════
+def _build_trace_result(combo_d: dict, all_traces, elapsed_ms: int,
+                        *, error_info: str | None = None) -> dict:
+    """Build a response dict with PlantUML text.
 
     Parameters
     ----------
@@ -118,32 +118,35 @@ def _build_trace_result(combo_d: dict, all_traces, elapsed_ms: int) -> dict:
         All terminal traces from TLC (for concurrent-step detection).
     elapsed_ms : int
         TLC execution time.
+    error_info : str or None
+        If set, marks the diagram as a TLC error counterexample.
 
     Returns
     -------
     dict
-        Complete response with trace, steps, channelStyles,
-        puml_text, and puml_svg.
+        Response with parameters, puml_text, and elapsed_ms.
+        The frontend renders via a PlantUML server or shows raw text.
     """
     cfg = tlc_sweep.CONFIG
     steps, canonical_trace = tlc_sweep.compute_steps(all_traces)
     channels = cfg.resolve_channels()
     channel_styles = tlc_sweep._channel_styles(channels) if channels else {}
 
-    data = {
+    # Build internal data dict for PlantUML generation
+    internal = {
         "parameters":    combo_d,
         "participants":  cfg.participants,
         "trace":         canonical_trace,
         "steps":         steps,
         "channelStyles": channel_styles,
     }
-    puml_text = tlc_sweep.trace_data_to_puml(data)
-    puml_svg  = _render_puml_svg(puml_text)
+    puml_text = tlc_sweep.trace_data_to_puml(internal, error_info=error_info)
 
-    data["puml_text"]   = puml_text
-    data["puml_svg"]    = puml_svg
-    data["elapsed_ms"]  = elapsed_ms
-    return data
+    return {
+        "parameters":  combo_d,
+        "puml_text":   puml_text,
+        "elapsed_ms":  elapsed_ms,
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -155,7 +158,7 @@ def get_trace_cached(combo_key: tuple[tuple[str, str], ...]):
     """Run TLC for one combo and return a complete result dict or raise.
 
     combo_key is a tuple of (name, value) pairs (hashable for LRU).
-    The result includes trace, steps, channelStyles, puml_text, and puml_svg.
+    The result includes parameters, puml_text, and elapsed_ms.
     """
     combo_d = dict(combo_key)
     cfg_path = Path("tmp/_tlc_server_temp.cfg")
@@ -323,10 +326,8 @@ class TLCHandler(BaseHTTPRequestHandler):
         try:
             result = get_trace_cached(combo_key)
             self._json_response(200, result)
-            n = len(result.get("trace", []))
             ms = result.get("elapsed_ms", 0)
-            svg = "svg" if result.get("puml_svg") else "puml"
-            print(f"  POST /api/trace {tag} → 200  ({n} msgs, {ms}ms, {svg})")
+            print(f"  POST /api/trace {tag} \u2192 200  ({ms}ms)")
 
         except RuntimeError as e:
             self._json_response(500, {
@@ -452,13 +453,29 @@ class TLCHandler(BaseHTTPRequestHandler):
             if not success:
                 lines = tlc_combined.strip().splitlines()
                 err_context = "\n".join(lines[-25:]) if len(lines) > 25 else tlc_combined
-                self._json_response(422, {
+
+                # Try to extract the counterexample trace from TLC output
+                error_trace = tlc_sweep.parse_trace(tlc_combined)
+                resp = {
                     "error": "TLC model checking failed",
                     "details": err_context.strip(),
                     "stage": "tlc2.TLC",
                     "elapsed_ms": elapsed,
-                })
-                print(f"  POST /api/trace-custom {tag} → 422 (TLC error, {elapsed}ms)")
+                }
+                if error_trace:
+                    # Build error-styled PlantUML from the counterexample
+                    # Summarise the error for the diagram banner
+                    error_summary = _extract_error_summary(tlc_combined)
+                    result = _build_trace_result(
+                        combo_d, [error_trace], elapsed,
+                        error_info=error_summary,
+                    )
+                    resp["puml_text"] = result["puml_text"]
+                    resp["error_trace"] = True
+                    print(f"  POST /api/trace-custom {tag} \u2192 422 (TLC error, {elapsed}ms, counterexample {len(error_trace)} msgs)")
+                else:
+                    print(f"  POST /api/trace-custom {tag} \u2192 422 (TLC error, {elapsed}ms)")
+                self._json_response(422, resp)
                 return
 
             # Parse trace from dump
@@ -481,8 +498,7 @@ class TLCHandler(BaseHTTPRequestHandler):
             result = _build_trace_result(combo_d, [trace], elapsed)
             result["custom"] = True
             self._json_response(200, result)
-            svg = "svg" if result.get("puml_svg") else "puml"
-            print(f"  POST /api/trace-custom {tag} → 200  ({len(trace)} msgs, {elapsed}ms, {svg})")
+            print(f"  POST /api/trace-custom {tag} \u2192 200  ({elapsed}ms)")
 
         except subprocess.TimeoutExpired:
             self._json_response(504, {
@@ -719,16 +735,16 @@ def main():
     try:
         combo_key = tuple(sorted(warmup.items()))
         result = get_trace_cached(combo_key)
-        n = len(result.get("trace", []))
         ms = result.get("elapsed_ms", 0)
-        svg_ok = "yes" if result.get("puml_svg") else "no"
-        print(f"  OK — {n} messages in {ms}ms (SVG: {svg_ok})")
+        print(f"  OK \u2014 {ms}ms")
     except Exception as e:
         print(f"  WARNING: warm-up failed: {e}")
         print(f"  Server will start anyway, but TLC may not work.")
 
-    # Start server
-    server = HTTPServer((args.host, args.port), TLCHandler)
+    # Start server (threaded so health-checks respond during long TLC runs)
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    server = ThreadedHTTPServer((args.host, args.port), TLCHandler)
     const_names = ", ".join(cfg.constant_names)
     print(f"\nListening on http://{args.host}:{args.port}")
     print(f"  GET  /api/health")

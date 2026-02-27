@@ -26,6 +26,7 @@ import json
 import re
 import subprocess
 import sys
+import zipfile
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
@@ -413,10 +414,6 @@ html, body {{ height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Seg
 .trace-table th {{ background: #f6f8fa; font-weight: 600; color: #656d76; position: sticky; top: 0; }}
 .trace-table .ch-swatch {{ display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }}
 
-/* ── Tips ─────────────────────────────────────────────── */
-.tips {{ padding: 8px 14px; font-size: 11px; color: #656d76; background: #f6f8fa; border-top: 1px solid #d0d7de; flex-shrink: 0; }}
-.tips b {{ color: #1f2328; }}
-
 /* ── View containers ──────────────────────────────────── */
 #view-sequence {{ display: flex; flex-direction: column; flex: 1; overflow: hidden; }}
 
@@ -531,12 +528,12 @@ html, body {{ height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Seg
         <span class="setup-toggle" id="setup-toggle">&#9654; Setup Instructions</span>
         <div id="setup-content" class="setup-content" style="display:none; margin-top:8px;">
           <ol>
-            <li>Ensure <code>java</code> (JDK&nbsp;17+) is on your PATH</li>
-            <li>Download the required files (available <a href="./" style="color:#7dd3fc">here</a>):<br><code>tlc_server.py</code>, <code>tlc_sweep.py</code>, <code>tla2tools.jar</code>, <code>&lt;model&gt;.pcal</code></li>
-            <li>Run:<br><code>python <a href="tlc_server.py" style="color:#7dd3fc">tlc_server.py</a></code></li>
-            <li>Click <strong>Connect</strong> above</li>
+            <li>Ensure <code>java</code> (JDK&nbsp;17+) and <code>python</code> (3.10+) are on your PATH</li>
+            <li>Download <a href="server.zip" style="color:#7dd3fc" download><strong>server.zip</strong></a> and extract to a local folder</li>
+            <li>Run:<br><code>python tlc_server.py</code></li>
+            <li>Enter <code>http://127.0.0.1:18080</code> above and click <strong>Connect</strong></li>
           </ol>
-          <p style="margin-top:6px">The server runs TLC model-checking on demand. Dropdown changes will POST to the server and re-render live TLC&nbsp;traces.</p>
+          <p style="margin-top:6px">The server runs TLC model-checking on demand. Parameter changes and <b>Run&nbsp;TLC</b> will POST to the server and re-render live traces.</p>
           <p style="margin-top:4px;font-size:11px">Optional flags:<br>
             <code>--port 18082</code> &mdash; custom port<br>
             <code>--host 0.0.0.0</code> &mdash; bind all interfaces
@@ -608,11 +605,6 @@ html, body {{ height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Seg
           </table>
         </details>
 
-        <div class="tips">
-          <b>Hover</b> an arrow for details &nbsp;&middot;&nbsp;
-          <b>Click</b> an arrow to highlight its concurrency group &nbsp;&middot;&nbsp;
-          <b>&parallel;</b> marks concurrent messages (same TLA+ step)
-        </div>
       </div>
 
     </div>
@@ -664,6 +656,7 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
   let currentKey = null;
   let lastTraceData = null;  // most recently rendered trace (static, live, or custom)
   let liveMode = false;
+  const CUSTOM_TRACES = {{}};  // cache for custom TLC runs (keyed by combo key)
   let heartbeatTimer = null;
   let pumlServerLive = false;   // whether PlantUML server health-check passed
   let serverUrl = inpServer.value.replace(/\\/+$/, "");
@@ -756,8 +749,7 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
   /* ── Build legend (config CHANNEL_STYLES, overlaid by live data) ── */
   function buildLegend(data) {{
     legendEl.innerHTML = "";
-    // Merge: global from config, then overlay from live server response
-    const styles = Object.assign({{}}, CHANNEL_STYLES, (data && data.channelStyles) || {{}});
+    const styles = CHANNEL_STYLES;
     const seenCh = new Map();
     Object.values(styles).forEach(v => {{
       if (!seenCh.has(v.name)) seenCh.set(v.name, v.stroke);
@@ -818,40 +810,92 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
     currentKey = vals.join(".");
     titleEl.textContent = vals.map(humanize).join(" \\u203A ");
 
-    if (liveMode) {{
-      // Live mode: fetch from TLC server
-      const params = {{}};
-      CONSTANT_NAMES.forEach((name, i) => {{ params[name] = vals[i]; }});
-      fetchLiveTrace(params);
-    }} else {{
-      if (INVALID_COMBOS.has(currentKey)) {{
-        container.innerHTML = '<div class="combo-status combo-invalid">'
-          + '<span class="combo-status-icon">&#9888;</span>'
-          + '<p><b>Invalid combination</b></p>'
-          + '<p>This parameter combination is not physically possible.</p></div>';
-        btnExport.style.display = "none";
-        btnCopyPuml.style.display = "none";
-        return;
-      }}
-      if (SKIPPED_COMBOS.has(currentKey)) {{
-        container.innerHTML = '<div class="combo-status combo-skipped">'
-          + '<span class="combo-status-icon">&#9203;</span>'
-          + '<p><b>Combination not yet explored</b></p>'
-          + '<p>This valid combination was skipped during the sweep.<br>'
-          + 'Connect in <b>Live</b> mode or run a full sweep to obtain its trace.</p></div>';
-        btnExport.style.display = "none";
-        btnCopyPuml.style.display = "none";
-        return;
-      }}
-      const data = ALL_TRACES[currentKey];
-      if (!data) {{
-        container.innerHTML = '<p class="no-diagram">Trace not found for ' + currentKey + '</p>';
-        return;
-      }}
-      renderTraceData(data);
+    // Invalid combo check (applies in both static and live modes)
+    if (INVALID_COMBOS.has(currentKey)) {{
+      container.innerHTML = '<div class="combo-status combo-invalid">'
+        + '<span class="combo-status-icon">&#9888;</span>'
+        + '<p><b>Invalid combination</b></p>'
+        + '<p>This parameter combination is not physically possible.</p></div>';
+      btnExport.style.display = "none";
+      btnCopyPuml.style.display = "none";
+      elapsedEl.textContent = "";
+      clearTraceTable();
+      updateUrl();
+      return;
     }}
 
+    // Try cached custom trace first (from a previous "Run TLC" click)
+    if (CUSTOM_TRACES[currentKey]) {{
+      renderTraceData(CUSTOM_TRACES[currentKey]);
+      elapsedEl.textContent = "Custom (cached)";
+      updateUrl();
+      return;
+    }}
+
+    // Try pre-computed sweep data
+    const data = ALL_TRACES[currentKey];
+    if (data) {{
+      renderTraceData(data);
+      elapsedEl.textContent = "";
+      updateUrl();
+      return;
+    }}
+
+    // Skipped / not-yet-explored combo
+    if (SKIPPED_COMBOS.has(currentKey)) {{
+      const hint = liveMode
+        ? 'Click <b>Run TLC</b> to generate its trace.'
+        : 'Connect in <b>Live</b> mode or run a full sweep to obtain its trace.';
+      container.innerHTML = '<div class="combo-status combo-skipped">'
+        + '<span class="combo-status-icon">&#9203;</span>'
+        + '<p><b>Combination not yet explored</b></p>'
+        + '<p>This valid combination was skipped during the sweep.<br>' + hint + '</p></div>';
+      btnExport.style.display = "none";
+      btnCopyPuml.style.display = "none";
+      elapsedEl.textContent = "";
+      clearTraceTable();
+      updateUrl();
+      return;
+    }}
+
+    // Truly unknown combo
+    container.innerHTML = '<p class="no-diagram">Trace not found for ' + currentKey + '</p>';
+    elapsedEl.textContent = "";
+    clearTraceTable();
     updateUrl();
+  }}
+
+  /* ── Clear trace table ─────────────────────────────── */
+  function clearTraceTable() {{
+    const traceSection = document.getElementById("trace-section");
+    tbody.innerHTML = "";
+    traceSection.style.display = "none";
+  }}
+
+  /* ── Parse trace from PlantUML text ─────────────────── */
+  function parseTraceFromPuml(pumlText) {{
+    if (!pumlText) return [];
+    // Build alias → display-name map from participant declarations
+    const aliasMap = {{}};
+    const partRe = /^participant\\s+"([^"]+)"\\s+as\\s+(\\S+)/gm;
+    let pm;
+    while ((pm = partRe.exec(pumlText)) !== null) {{
+      aliasMap[pm[2]] = pm[1];
+    }}
+    // Match arrow lines:
+    //   Src -[#color]> Dst : <color:#hex><b>MSG</b></color>\\n<color:#hex><size:9>CH</size></color>
+    const arrowRe = /^\\s*(\\S+)\\s+-\\[#[0-9a-fA-F]+(?:,\\w+)?\\]>\\s+(\\S+)\\s+:\\s+<color:#[0-9a-fA-F]+><b>(.+?)<\\/b><\\/color>(?:\\\\n<color:#[0-9a-fA-F]+><size:9>(.+?)<\\/size><\\/color>)?/gm;
+    const trace = [];
+    let am;
+    while ((am = arrowRe.exec(pumlText)) !== null) {{
+      trace.push({{
+        src: aliasMap[am[1]] || am[1],
+        dst: aliasMap[am[2]] || am[2],
+        msg: am[3],
+        ch:  am[4] || ""
+      }});
+    }}
+    return trace;
   }}
 
   /* ── Render trace data (shared by static & live) ────── */
@@ -860,14 +904,15 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
     buildLegend(data);
     refreshDiagram(data);
 
-    // Trace table — only populated when trace array exists (live mode)
+    // Parse trace from PlantUML text (works for sweep, custom, and live data)
     const traceSection = document.getElementById("trace-section");
     tbody.innerHTML = "";
-    if (data && data.trace && data.trace.length > 0) {{
+    const trace = parseTraceFromPuml(data && data.puml_text);
+    if (trace.length > 0) {{
       traceSection.style.display = "";
-      const styles = Object.assign({{}}, CHANNEL_STYLES, (data && data.channelStyles) || {{}});
-      data.trace.forEach((m, i) => {{
-        const chKey = m.ch || m.channel || "";
+      const styles = Object.assign({{}}, CHANNEL_STYLES);
+      trace.forEach((m, i) => {{
+        const chKey = m.ch || "";
         const ch = (chKey && styles[chKey]) || {{ stroke: "#616161", name: chKey || "—" }};
         const tr = document.createElement("tr");
         tr.innerHTML = "<td>" + (i+1) + "</td>"
@@ -879,41 +924,6 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
     }} else {{
       traceSection.style.display = "none";
     }}
-  }}
-
-  /* ── Live trace fetch ────────────────────────────────── */
-  function fetchLiveTrace(params) {{
-    spinnerEl.classList.add("active");
-    elapsedEl.textContent = "";
-
-    const t0 = performance.now();
-    fetch(serverUrl + "/api/trace", {{
-      method: "POST",
-      headers: {{ "Content-Type": "application/json" }},
-      body: JSON.stringify(params),
-    }})
-    .then(resp => {{
-      if (!resp.ok) return resp.json().then(e => {{ throw new Error(e.error || resp.statusText); }});
-      return resp.json();
-    }})
-    .then(data => {{
-      spinnerEl.classList.remove("active");
-      const clientMs = Math.round(performance.now() - t0);
-      const serverMs = data.elapsed_ms || "?";
-      elapsedEl.textContent = "TLC: " + serverMs + "ms · round-trip: " + clientMs + "ms";
-      renderTraceData(data);
-    }})
-    .catch(err => {{
-      spinnerEl.classList.remove("active");
-      elapsedEl.textContent = "";
-      if (err instanceof TypeError) {{
-        // Network error — server unreachable, auto-disconnect
-        setStatic();
-        container.innerHTML = '<p class="no-diagram" style="color:#ef4444">Server disconnected &mdash; switched to static mode</p>';
-      }} else {{
-        container.innerHTML = '<p class="no-diagram" style="color:#ef4444">Live fetch failed: ' + err.message + '</p>';
-      }}
-    }});
   }}
 
   /* ── PlantUML text encoding (deflate-raw + custom base64) ── */
@@ -997,11 +1007,7 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
     // Show/hide Copy PlantUML button based on availability
     btnCopyPuml.style.display = data.puml_text ? "" : "none";
 
-    if (data.puml_svg) {{
-      // Live mode returns pre-rendered SVG
-      container.innerHTML = data.puml_svg;
-      btnExport.style.display = "";
-    }} else if (data.puml_text && pumlServerLive) {{
+    if (data.puml_text && pumlServerLive) {{
       // PlantUML server connected: fetch SVG via fetch()
       try {{
         const encoded = await encodePlantUml(data.puml_text);
@@ -1371,11 +1377,15 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
       const clientMs = Math.round(performance.now() - t0);
 
       if (ok) {{
-        // Success — switch to diagram tab and render
+        // Success — cache and render
         const serverMs = data.elapsed_ms || "?";
-        editorStatusEl.textContent = "\\u2714 TLC passed \\u2014 " + data.trace.length + " msgs, " + serverMs + "ms TLC, " + clientMs + "ms total";
+        const nMsgs = parseTraceFromPuml(data.puml_text).length;
+        editorStatusEl.textContent = "\\u2714 TLC passed \\u2014 " + nMsgs + " msgs, " + serverMs + "ms TLC, " + clientMs + "ms total";
         editorStatusEl.className = "editor-status success";
         errorPanel.classList.remove("active");
+
+        // Cache the custom result so switching away and back doesn't re-run TLC
+        if (currentKey) CUSTOM_TRACES[currentKey] = data;
 
         renderTraceData(data);
         elapsedEl.textContent = "Custom TLC: " + serverMs + "ms \\u00b7 round-trip: " + clientMs + "ms";
@@ -1387,6 +1397,15 @@ const SKIPPED_COMBOS = new Set({json.dumps(skipped_combos)});</script>
         editorStatusEl.className = "editor-status error";
         errorOutput.textContent = details;
         errorPanel.classList.add("active");
+
+        // If server extracted a counterexample trace, render it
+        if (data.puml_text && data.error_trace) {{
+          const serverMs = data.elapsed_ms || "?";
+          renderTraceData(data);
+          elapsedEl.textContent = "\\u26a0 ERROR trace: " + serverMs + "ms TLC, " + clientMs + "ms total";
+          // Cache so switching away and back preserves the error diagram
+          if (currentKey) CUSTOM_TRACES[currentKey] = data;
+        }}
       }}
     }})
     .catch(err => {{
@@ -1506,24 +1525,29 @@ def main_build(config) -> None:
     size_kb = OUTPUT_HTML.stat().st_size / 1024
     print(f"   Output: {OUTPUT_HTML} ({size_kb:,.0f} KB)")
 
-    # Copy server collateral
+    # Copy server collateral and create server.zip
     tools_dir = Path(__file__).resolve().parent
-    collateral = ["tlc_server.py", "tlc_sweep.py", "pcal_config.py", "tla2tools.jar", "plantuml.jar"]
-    for name in collateral:
-        src = tools_dir / name
-        if src.exists():
-            dst = DISTRIB_DIR / name
-            shutil.copy2(src, dst)
-
-    # Copy model source
-    if pcal_path.exists():
-        shutil.copy2(pcal_path, DISTRIB_DIR / pcal_path.name)
-
+    server_files = {
+        "tlc_server.py":  tools_dir / "tlc_server.py",
+        "tlc_sweep.py":   tools_dir / "tlc_sweep.py",
+        "pcal_config.py": tools_dir / "pcal_config.py",
+        "tla2tools.jar":  tools_dir / "tla2tools.jar",
+    }
+    # Model-specific files
     config_file = SCRIPT_DIR / f"{config.module}.explorer.json"
     if config_file.exists():
-        shutil.copy2(config_file, DISTRIB_DIR / config_file.name)
+        server_files[config_file.name] = config_file
+    if pcal_path.exists():
+        server_files[pcal_path.name] = pcal_path
 
-    print(f"   Server collateral copied to {DISTRIB_DIR}")
+    # Build server.zip containing everything needed to run tlc_server.py
+    zip_path = DISTRIB_DIR / "server.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, src in server_files.items():
+            if src.exists():
+                zf.write(src, arcname)
+    zip_kb = zip_path.stat().st_size / 1024
+    print(f"   Server bundle: {zip_path} ({zip_kb:,.0f} KB)")
 
     # Build DOCUMENTATION.html from Markdown (search repo root, then model dir)
     doc_md = None
@@ -1621,20 +1645,27 @@ def main():
     print(f"   Output: {OUTPUT_HTML}")
     print(f"   Size:   {size_kb:,.0f} KB ({size_mb:.2f} MB)")
 
-    # 5. Copy server collateral to distrib/
-    print(f"\n5. Copying server collateral to {DISTRIB_DIR}")
-    server_files = ["tlc_server.py", "tlc_sweep.py", "pcal_config.py",
-                    f"{MODULE}.explorer.json", "tla2tools.jar", "plantuml.jar",
-                    f"{MODULE}.pcal"]
-    for name in server_files:
-        src = SCRIPT_DIR / name
-        dst = DISTRIB_DIR / name
-        if src.exists():
-            shutil.copy2(src, dst)
-            sz = dst.stat().st_size / 1024
-            print(f"   {name} ({sz:,.0f} KB)")
-        else:
-            print(f"   WARNING: {name} not found \u2014 skipping")
+    # 5. Create server.zip in distrib/
+    print(f"\n5. Creating server.zip in {DISTRIB_DIR}")
+    server_files = {
+        "tlc_server.py":  SCRIPT_DIR / "tlc_server.py",
+        "tlc_sweep.py":   SCRIPT_DIR / "tlc_sweep.py",
+        "pcal_config.py": SCRIPT_DIR / "pcal_config.py",
+        "tla2tools.jar":  SCRIPT_DIR / "tla2tools.jar",
+        f"{MODULE}.explorer.json": SCRIPT_DIR / f"{MODULE}.explorer.json",
+        f"{MODULE}.pcal":          SCRIPT_DIR / f"{MODULE}.pcal",
+    }
+    zip_path = DISTRIB_DIR / "server.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for arcname, src in server_files.items():
+            if src.exists():
+                zf.write(src, arcname)
+                sz = src.stat().st_size / 1024
+                print(f"   {arcname} ({sz:,.0f} KB)")
+            else:
+                print(f"   WARNING: {arcname} not found \u2014 skipping")
+    zip_kb = zip_path.stat().st_size / 1024
+    print(f"   server.zip ({zip_kb:,.0f} KB)")
 
     # 6. Build DOCUMENTATION.html via mmd2doc
     doc_md = SCRIPT_DIR / "DOCUMENTATION.md"
@@ -1692,7 +1723,7 @@ def main():
     print(f"\n{'=' * 60}")
     print(f"  Traces embedded:    {len(all_traces)}")
     print(f"  Constants:          {constant_names}")
-    print(f"  Server collateral:  {', '.join(server_files)}")
+    print(f"  Server bundle:      server.zip ({zip_kb:,.0f} KB)")
     print(f"  Documentation:      DOCUMENTATION.html")
     print(f"  Output:             {OUTPUT_HTML.resolve()}")
     print(f"{'=' * 60}")

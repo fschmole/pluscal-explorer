@@ -352,7 +352,7 @@ def _esc_puml(s):
     return s.replace('\\', '\\\\')
 
 
-def trace_data_to_puml(data):
+def trace_data_to_puml(data, *, error_info=None):
     """Convert a trace data dict to PlantUML text.
 
     This is the Python equivalent of plantUmlGenerator.ts —
@@ -362,6 +362,9 @@ def trace_data_to_puml(data):
     ----------
     data : dict
         Keys: parameters, participants, trace, steps, channelStyles.
+    error_info : str or None
+        If set, the diagram is styled as an error case with a faint red
+        background and the given string shown as the error summary.
 
     Returns
     -------
@@ -373,7 +376,10 @@ def trace_data_to_puml(data):
     lines.append('')
 
     # Skin settings for clean look
-    lines.append('skinparam backgroundColor transparent')
+    if error_info:
+        lines.append('skinparam backgroundColor #FFF0F0')
+    else:
+        lines.append('skinparam backgroundColor transparent')
     lines.append('skinparam sequenceMessageAlign center')
     lines.append('skinparam responseMessageBelowArrow true')
     lines.append('skinparam sequenceGroupBorderThickness 1')
@@ -388,6 +394,16 @@ def trace_data_to_puml(data):
 
     lines.append('autonumber')
     lines.append('')
+
+    # Error banner (before participants so it appears at the top)
+    if error_info:
+        # Escape PlantUML creole markup in the error text
+        safe = _esc_puml(error_info)
+        lines.append(f'note across #FFCCCC')
+        lines.append(f'  <b><color:red>\u26a0 TLC ERROR — Counterexample Trace</color></b>')
+        lines.append(f'  {safe}')
+        lines.append(f'end note')
+        lines.append('')
 
     # Parameter header
     params = data.get("parameters", {})
