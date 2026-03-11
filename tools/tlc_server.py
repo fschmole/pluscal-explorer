@@ -74,35 +74,15 @@ def detect_tlc_version() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Error summary extraction
+# Error summary extraction — delegate to tlc_sweep
 # ═══════════════════════════════════════════════════════════════════════
 
 def _extract_error_summary(tlc_output: str) -> str:
     """Extract a short error description from TLC output for the diagram banner.
 
-    Looks for common TLC error patterns:
-      - "Temporal properties were violated."
-      - "Invariant ... is violated."
-      - "Deadlock reached."
-      - "State N: Stuttering"
-    Returns a one-line summary.
+    Delegates to tlc_sweep._extract_error_summary (single source of truth).
     """
-    import re as _re
-    if "Temporal properties were violated" in tlc_output:
-        # Check for stuttering
-        m = _re.search(r'State (\d+): Stuttering', tlc_output)
-        if m:
-            return f"Temporal property violated (stuttering at state {m.group(1)})"
-        return "Temporal property violated"
-    m = _re.search(r'Invariant\s+(\S+)\s+is violated', tlc_output)
-    if m:
-        return f"Invariant {m.group(1)} violated"
-    if "Deadlock reached" in tlc_output:
-        return "Deadlock reached"
-    m = _re.search(r'Error:\s*(.+)', tlc_output)
-    if m:
-        return m.group(1).strip()[:120]
-    return "TLC model checking failed"
+    return tlc_sweep._extract_error_summary(tlc_output)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -192,10 +172,18 @@ class TLCHandler(BaseHTTPRequestHandler):
 
     server_version = "TLCServer/1.0"
     tlc_version = "unknown"
+    _health_dots = 0          # class-level counter for keepalive dots
 
     # Suppress default request logging (we do our own)
     def log_message(self, fmt, *args):
         pass
+
+    @classmethod
+    def _flush_dots(cls):
+        """If any health-check dots were printed, finish the line."""
+        if cls._health_dots:
+            print()            # newline after the dots
+            cls._health_dots = 0
 
     def _cors_headers(self):
         """Set CORS headers for localhost origins."""
@@ -259,7 +247,10 @@ class TLCHandler(BaseHTTPRequestHandler):
             "model": tlc_sweep.MODULE,
             "java": tlc_sweep.JAVA,
         })
-        print(f"  GET /api/health → 200")
+        if self._health_dots == 0:
+            print("  GET /api/health", end="", flush=True)
+        print(".", end="", flush=True)
+        self.__class__._health_dots += 1
 
     # ── /api/params ───────────────────────────────────────────────────
     def _handle_params(self):
@@ -275,6 +266,7 @@ class TLCHandler(BaseHTTPRequestHandler):
             "skip": skip_list,
             "title": cfg.title,
         })
+        self._flush_dots()
         print(f"  GET /api/params → 200  ({len(invalid_list)} invalid, {len(skip_list)} skip combos)")
 
     # ── /api/trace ────────────────────────────────────────────────────
@@ -314,6 +306,7 @@ class TLCHandler(BaseHTTPRequestHandler):
                 "error": f"invalid combo: {tag}",
                 "reason": "This parameter combination is not physically possible"
             })
+            self._flush_dots()
             print(f"  POST /api/trace {tag} → 422 (invalid)")
             return
         # NOTE: skipped combos are *not* blocked here — the server should
@@ -327,6 +320,7 @@ class TLCHandler(BaseHTTPRequestHandler):
             result = get_trace_cached(combo_key)
             self._json_response(200, result)
             ms = result.get("elapsed_ms", 0)
+            self._flush_dots()
             print(f"  POST /api/trace {tag} \u2192 200  ({ms}ms)")
 
         except RuntimeError as e:
@@ -334,10 +328,12 @@ class TLCHandler(BaseHTTPRequestHandler):
                 "error": str(e),
                 "parameters": combo_d,
             })
+            self._flush_dots()
             print(f"  POST /api/trace {tag} → 500  (TLC error)")
 
         except Exception as e:
             self._json_response(500, {"error": f"unexpected error: {e}"})
+            self._flush_dots()
             print(f"  POST /api/trace {tag} → 500  ({e})")
 
     # ── /api/trace-custom ─────────────────────────────────
@@ -411,6 +407,7 @@ class TLCHandler(BaseHTTPRequestHandler):
                         "details": pcal_combined.strip(),
                         "stage": "pcal.trans",
                     })
+                    self._flush_dots()
                     print(f"  POST /api/trace-custom {tag} → 422 (pcal error)")
                     return
 
@@ -420,6 +417,7 @@ class TLCHandler(BaseHTTPRequestHandler):
                         "details": pcal_combined.strip(),
                         "stage": "pcal.trans",
                     })
+                    self._flush_dots()
                     print(f"  POST /api/trace-custom {tag} → 422 (pcal unrecoverable)")
                     return
 
@@ -472,8 +470,10 @@ class TLCHandler(BaseHTTPRequestHandler):
                     )
                     resp["puml_text"] = result["puml_text"]
                     resp["error_trace"] = True
+                    self._flush_dots()
                     print(f"  POST /api/trace-custom {tag} \u2192 422 (TLC error, {elapsed}ms, counterexample {len(error_trace)} msgs)")
                 else:
+                    self._flush_dots()
                     print(f"  POST /api/trace-custom {tag} \u2192 422 (TLC error, {elapsed}ms)")
                 self._json_response(422, resp)
                 return
@@ -492,12 +492,14 @@ class TLCHandler(BaseHTTPRequestHandler):
                     "stage": "parse",
                     "elapsed_ms": elapsed,
                 })
+                self._flush_dots()
                 print(f"  POST /api/trace-custom {tag} → 500 (no trace, {elapsed}ms)")
                 return
 
             result = _build_trace_result(combo_d, [trace], elapsed)
             result["custom"] = True
             self._json_response(200, result)
+            self._flush_dots()
             print(f"  POST /api/trace-custom {tag} \u2192 200  ({elapsed}ms)")
 
         except subprocess.TimeoutExpired:
@@ -505,10 +507,12 @@ class TLCHandler(BaseHTTPRequestHandler):
                 "error": "TLC timed out (120s limit)",
                 "stage": "timeout",
             })
+            self._flush_dots()
             print(f"  POST /api/trace-custom {tag} → 504 (timeout)")
 
         except Exception as e:
             self._json_response(500, {"error": f"unexpected error: {e}"})
+            self._flush_dots()
             print(f"  POST /api/trace-custom {tag} → 500  ({e})")
 
         finally:
@@ -564,6 +568,7 @@ class TLCHandler(BaseHTTPRequestHandler):
                         "details": (pcal_result.stdout + pcal_result.stderr).strip(),
                         "stage": "pcal.trans",
                     })
+                    self._flush_dots()
                     print(f"  POST /api/stategraph → 422 (pcal error)")
                     return
                 _pcal_cache[src_hash] = tla_file.read_text(encoding="utf-8")
@@ -597,6 +602,7 @@ class TLCHandler(BaseHTTPRequestHandler):
                     "dot": dot_text,
                     "elapsed_ms": elapsed,
                 })
+                self._flush_dots()
                 print(f"  POST /api/stategraph → 200 ({len(dot_text)} chars, {elapsed}ms)")
             else:
                 # TLC may not have produced a .dot file — return what we can
@@ -607,14 +613,17 @@ class TLCHandler(BaseHTTPRequestHandler):
                     "stage": "tlc2.TLC",
                     "elapsed_ms": elapsed,
                 })
+                self._flush_dots()
                 print(f"  POST /api/stategraph → 422 (no .dot, {elapsed}ms)")
 
         except subprocess.TimeoutExpired:
             self._json_response(504, {"error": "TLC timed out (120s limit)", "stage": "timeout"})
+            self._flush_dots()
             print(f"  POST /api/stategraph → 504 (timeout)")
 
         except Exception as e:
             self._json_response(500, {"error": f"unexpected error: {e}"})
+            self._flush_dots()
             print(f"  POST /api/stategraph → 500 ({e})")
 
         finally:
@@ -706,7 +715,6 @@ def main():
     tlc_sweep.CONFIG = cfg
     tlc_sweep.MODULE = cfg.module
     tlc_sweep.SCRIPT_DIR = model_dir
-    tlc_sweep.SKIP = cfg.expanded_excluded_set()
 
     # Work in the model directory so TLC can find .tla files
     os.chdir(str(model_dir))

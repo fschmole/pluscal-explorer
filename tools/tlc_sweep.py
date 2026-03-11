@@ -246,11 +246,6 @@ def translate_pcal(pcal_path=None, tla_path=None):
     print(f"  pcal.trans -> {tla_path} (OK)")
 
 
-# SKIP set is now dynamically computed from CONFIG.expanded_skip_set()
-# This backward-compat name is set in load_model_config() / main().
-SKIP: set[tuple[str, ...]] = set()
-
-
 # ── Channel-style generation (data-driven, no hardcoded names) ─────────
 # Palette of 16 highly distinguishable Material-Design colours.
 # Each entry is (stroke, label-fill) — label colour is a darker variant.
@@ -329,6 +324,32 @@ def _channel_styles(channels):
             "name":   _humanize_channel(key),
         }
     return styles
+
+
+def _extract_error_summary(tlc_output: str) -> str:
+    """Extract a short error description from TLC output for the diagram banner.
+
+    Looks for common TLC error patterns:
+      - "Temporal properties were violated."
+      - "Invariant ... is violated."
+      - "Deadlock reached."
+      - "State N: Stuttering"
+    Returns a one-line summary.
+    """
+    if "Temporal properties were violated" in tlc_output:
+        m = re.search(r'State (\d+): Stuttering', tlc_output)
+        if m:
+            return f"Temporal property violated (stuttering at state {m.group(1)})"
+        return "Temporal property violated"
+    m = re.search(r'Invariant\s+(\S+)\s+is violated', tlc_output)
+    if m:
+        return f"Invariant {m.group(1)} violated"
+    if "Deadlock reached" in tlc_output:
+        return "Deadlock reached"
+    m = re.search(r'Error:\s*(.+)', tlc_output)
+    if m:
+        return m.group(1).strip()[:120]
+    return "TLC model checking failed"
 
 
 def write_cfg(combo, cfg_path):
@@ -737,6 +758,22 @@ def run_single_combo(config: PcalConfig, combo_dict: dict, model_dir: Path) -> d
         return None
 
     if not success:
+        # Try to extract the counterexample trace from TLC output
+        error_trace = parse_trace(output)
+        if error_trace:
+            error_summary = _extract_error_summary(output)
+            steps_err, canonical_err = compute_steps([error_trace])
+            global_channels = config.resolve_channels()
+            global_styles = _channel_styles(global_channels) if global_channels else {}
+            return {
+                "parameters": combo_dict,
+                "participants": config.participants,
+                "trace": canonical_err,
+                "steps": steps_err,
+                "channelStyles": global_styles,
+                "error": True,
+                "error_info": error_summary,
+            }
         return None
 
     if not all_traces:
@@ -755,6 +792,27 @@ def run_single_combo(config: PcalConfig, combo_dict: dict, model_dir: Path) -> d
         "steps": steps,
         "channelStyles": global_styles,
     }
+
+
+def _kill_proc_tree(pid):
+    """Kill a process and all its children (Windows process-tree kill).
+
+    On Windows, subprocess.kill() only terminates the immediate process,
+    leaving JVM worker threads alive.  taskkill /T /F kills the whole tree.
+    On Unix, os.killpg() handles process groups.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=5, **_NOWIN)
+        except Exception:
+            pass
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception:
+            pass
 
 
 def run_tlc(cfg_path):
@@ -777,9 +835,19 @@ def run_tlc(cfg_path):
         "-workers", "1",
         "-dump", "tlc_dump",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                           cwd=str(tmp), **_NOWIN)
-    combined = result.stdout + result.stderr
+    # Use Popen so we can kill the full process tree on timeout.
+    # subprocess.run on Windows only kills the immediate process, leaving
+    # JVM worker threads alive — the root cause of stale TLC processes.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=str(tmp), **_NOWIN)
+    try:
+        stdout, stderr = proc.communicate(timeout=180)
+    except subprocess.TimeoutExpired:
+        _kill_proc_tree(proc.pid)
+        proc.kill()
+        proc.wait()
+        raise
+    combined = stdout + stderr
     success = "Model checking completed. No error has been found." in combined
 
     # Parse ALL terminal traces from dump file
@@ -812,9 +880,7 @@ def main():
     os.chdir(Path(__file__).parent)
 
     # Load config and set module-level globals
-    global SKIP
     cfg = load_model_config(args.model)
-    SKIP = cfg.expanded_excluded_set()
 
     print(f"Model:  {cfg.title}  ({cfg.module})")
     print(f"Config: {cfg._path}")
@@ -888,8 +954,24 @@ def main():
                 print(f"[{i:3d}/{total}] PASS  {tag}  (no trace extracted)")
             passed += 1
         else:
-            print(f"[{i:3d}/{total}] FAIL  {tag}")
             failed += 1
+            # Try to extract counterexample trace from TLC error output
+            error_trace = parse_trace(output)
+            if error_trace:
+                error_summary = _extract_error_summary(output)
+                steps_err, canonical_err = compute_steps([error_trace])
+                print(f"[{i:3d}/{total}] FAIL  {tag}  (counterexample: {len(error_trace)} msgs — {error_summary})")
+                all_results[tag] = {
+                    "parameters": combo_d,
+                    "participants": cfg.participants,
+                    "trace": canonical_err,
+                    "steps": steps_err,
+                    "channelStyles": global_styles,
+                    "error": True,
+                    "error_info": error_summary,
+                }
+            else:
+                print(f"[{i:3d}/{total}] FAIL  {tag}")
             errors.append((tag, output[-500:] if output else "no output"))
             # Save error output
             err_file = traces_dir / f"{tag}.error.txt"
@@ -908,14 +990,18 @@ def main():
 
     # Count unique vs total
     unique_tags = set(canonical.values())
-    print(f"   {len(all_results)} passing combos -> {len(unique_tags)} unique traces")
+    n_passing = sum(1 for t in all_results if not all_results[t].get("error"))
+    n_failing = sum(1 for t in all_results if all_results[t].get("error"))
+    print(f"   {n_passing} passing combos -> {len([t for t in unique_tags if not all_results[t].get('error')])} unique traces"
+          + (f", {n_failing} failing with counterexamples" if n_failing else ""))
 
     # Write canonical traces as .puml (PlantUML) — the primary output format.
     # PlantUML text can be embedded in specifications, rendered by any
     # PlantUML toolchain, or displayed in the web explorer.
     for tag in unique_tags:
         data = all_results[tag]
-        puml_text = trace_data_to_puml(data)
+        error_info = data.get("error_info") if data.get("error") else None
+        puml_text = trace_data_to_puml(data, error_info=error_info)
         puml_file = traces_dir / f"{tag}.puml"
         puml_file.write_text(puml_text, encoding="utf-8")
 

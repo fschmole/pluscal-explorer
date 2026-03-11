@@ -19,15 +19,9 @@ Usage:
 """
 from __future__ import annotations
 
-import argparse
 import datetime
-import shutil
 import json
-import re
-import subprocess
-import sys
 import zipfile
-from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -38,10 +32,6 @@ DISTRIB_DIR   = SCRIPT_DIR / "distrib"
 TRACES_DIR    = DISTRIB_DIR / "puml"
 
 OUTPUT_HTML   = DISTRIB_DIR / "index.html"
-
-# Suppress console window flash on Windows for subprocess calls
-_NOWIN = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # Helpers
@@ -80,58 +70,6 @@ def load_traces(constant_names: list[str] = None) -> dict:
                 }
 
     return traces
-
-
-def build_flow_tree(traces: dict, constant_names: list[str]) -> dict:
-    """Build nested dict from trace parameters, generic for any set of constants.
-
-    For N constants, builds an N-level nested dict where each level corresponds
-    to one constant (in order).  The leaf level is a list of values for the
-    last constant.
-
-    Example for MESI (Operation, InitState, RemoteState):
-        {
-            "Read": {"I": ["M", "E", "S", "I"], "M": ["I"], ...},
-            "Write": {"I": ["M", "E", "S", "I"], ...},
-        }
-    """
-    if not constant_names:
-        return {}
-    tree: dict = {}
-    for key, data in traces.items():
-        p = data["parameters"]
-        vals = [p.get(c, "") for c in constant_names]
-        if not all(vals):
-            continue
-        # Walk/create nested dicts for all but last constant
-        node = tree
-        for v in vals[:-1]:
-            node = node.setdefault(v, {})
-        # Last level is a list
-        if not isinstance(node.get(vals[-1]), list):
-            if vals[-1] not in node:
-                node[vals[-1]] = True  # leaf marker
-        # We also want to record the trace exists for this combo
-        # Actually, for N=1 the tree is {val: True}, for N>1 last level is a list
-    # Simpler approach: just record all combos as tag -> True, and let JS handle it
-    # Actually let me do this cleanly:
-    tree = {}
-    for key, data in traces.items():
-        p = data["parameters"]
-        vals = [p.get(c, "") for c in constant_names]
-        if not all(vals):
-            continue
-        if len(vals) == 1:
-            tree.setdefault(vals[0], True)
-        else:
-            node = tree
-            for v in vals[:-2]:
-                node = node.setdefault(v, {})
-            # Second-to-last level maps to list of last values
-            node.setdefault(vals[-2], [])
-            if vals[-1] not in node[vals[-2]]:
-                node[vals[-2]].append(vals[-1])
-    return tree
 
 
 def build_full_flow_tree(config) -> dict:
@@ -216,15 +154,17 @@ def build_documentation_html(md_path: Path, title: str = "Documentation",
 
     try:
         import markdown
-        body = markdown.markdown(
-            md_text,
-            extensions=["tables", "fenced_code", "codehilite", "toc", "sane_lists"],
-            extension_configs={"codehilite": {"css_class": "highlight", "guess_lang": False}},
-        )
     except ImportError:
-        # Graceful fallback — wrap raw markdown in <pre>
-        import html as _html
-        body = f"<pre>{_html.escape(md_text)}</pre>"
+        raise RuntimeError(
+            "Python 'markdown' package is required to build DOCUMENTATION.html.\n"
+            "Install it with:  pip install markdown"
+        )
+
+    body = markdown.markdown(
+        md_text,
+        extensions=["tables", "fenced_code", "codehilite", "toc", "sane_lists"],
+        extension_configs={"codehilite": {"css_class": "highlight", "guess_lang": False}},
+    )
 
     branding_footer = _render_branding_footer(branding) if branding else ""
 
@@ -1569,178 +1509,3 @@ def main_build(config) -> None:
         print(f"   Output: {doc_out} ({doc_kb:,.0f} KB)")
     else:
         print("\n3. No DOCUMENTATION.md found — skipping documentation build")
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Build PlusCal Flow Explorer")
-    p.add_argument("--serve", action="store_true", help="Start HTTP server after build")
-    p.add_argument("--port", type=int, default=18090, help="HTTP server port")
-    p.add_argument("--clean", action="store_true",
-                   help="Remove generated output (distrib/index.html, distrib/traces/) and exit")
-    return p.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    if args.clean:
-        removed = []
-        if OUTPUT_HTML.exists():
-            OUTPUT_HTML.unlink()
-            removed.append(str(OUTPUT_HTML))
-        if TRACES_DIR.exists():
-            shutil.rmtree(TRACES_DIR)
-            removed.append(str(TRACES_DIR) + "/")
-        if removed:
-            print("Cleaned:")
-            for r in removed:
-                print(f"  {r}")
-        else:
-            print("Nothing to clean.")
-        return
-
-    print("=" * 60)
-    print("PlusCal Flow Explorer — Build")
-    print("=" * 60)
-
-    # 1. Load traces
-    print(f"\n1. Loading traces from {TRACES_DIR}")
-    all_traces = load_traces()
-    print(f"   {len(all_traces)} PlantUML traces loaded")
-    if not all_traces:
-        sys.exit("ERROR: No .puml traces found. Run tlc_sweep.py first.")
-
-    # 2. Build flow tree
-    # For standalone mode, infer constant_names from trace parameters
-    sample_data = next(iter(all_traces.values()))
-    constant_names = sorted(sample_data["parameters"].keys())
-    flow_tree = build_flow_tree(all_traces, constant_names)
-    top_key = constant_names[0] if constant_names else "flows"
-    print(f"   Flow tree: {len(flow_tree)} {top_key} values")
-
-    # 3. Load PlusCal source for editor embedding
-    pcal_path = SCRIPT_DIR / f"{MODULE}.pcal" if MODULE else None
-    pcal_source = ""
-    if pcal_path and pcal_path.exists():
-        pcal_source = pcal_path.read_text(encoding="utf-8")
-        print(f"\n3. Loading PlusCal source from {pcal_path}")
-        print(f"   {len(pcal_source):,} bytes ({pcal_source.count(chr(10))} lines)")
-    else:
-        print(f"\n3. WARNING: {'pcal_path not set' if not pcal_path else f'{pcal_path} not found'} — editor will have empty source")
-
-    # 4. Build HTML
-    print(f"\n4. Building index.html …")
-    html = build_html(all_traces, flow_tree,
-                      pcal_source,
-                      pcal_filename=f"{MODULE}.pcal" if MODULE else "model.pcal",
-                      constant_names=constant_names)
-
-    OUTPUT_HTML.write_text(html, encoding="utf-8")
-    size_kb = OUTPUT_HTML.stat().st_size / 1024
-    size_mb = size_kb / 1024
-    print(f"   Output: {OUTPUT_HTML}")
-    print(f"   Size:   {size_kb:,.0f} KB ({size_mb:.2f} MB)")
-
-    # 5. Create server.zip in distrib/
-    print(f"\n5. Creating server.zip in {DISTRIB_DIR}")
-    server_files = {
-        "tlc_server.py":  SCRIPT_DIR / "tlc_server.py",
-        "tlc_sweep.py":   SCRIPT_DIR / "tlc_sweep.py",
-        "pcal_config.py": SCRIPT_DIR / "pcal_config.py",
-        "tla2tools.jar":  SCRIPT_DIR / "tla2tools.jar",
-        f"{MODULE}.explorer.json": SCRIPT_DIR / f"{MODULE}.explorer.json",
-        f"{MODULE}.pcal":          SCRIPT_DIR / f"{MODULE}.pcal",
-    }
-    zip_path = DISTRIB_DIR / "server.zip"
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for arcname, src in server_files.items():
-            if src.exists():
-                zf.write(src, arcname)
-                sz = src.stat().st_size / 1024
-                print(f"   {arcname} ({sz:,.0f} KB)")
-            else:
-                print(f"   WARNING: {arcname} not found \u2014 skipping")
-    zip_kb = zip_path.stat().st_size / 1024
-    print(f"   server.zip ({zip_kb:,.0f} KB)")
-
-    # 6. Build DOCUMENTATION.html via mmd2doc
-    doc_md = SCRIPT_DIR / "DOCUMENTATION.md"
-    print(f"\n6. Building DOCUMENTATION.html via mmd2doc")
-    if doc_md.exists():
-        try:
-            result = subprocess.run(
-                ["iparch-mmd2doc", str(doc_md), "-v", "INFO"],
-                capture_output=True, text=True, timeout=120,
-                cwd=str(SCRIPT_DIR), **_NOWIN,
-            )
-            if result.returncode != 0:
-                print(f"   WARNING: mmd2doc failed (exit {result.returncode})")
-                combined = (result.stdout + result.stderr).strip()
-                if combined:
-                    for line in combined.splitlines()[-5:]:
-                        print(f"   {line}")
-            else:
-                print(f"   mmd2doc completed successfully")
-        except FileNotFoundError:
-            print(f"   WARNING: iparch-mmd2doc not found in PATH \u2014 skipping")
-        except subprocess.TimeoutExpired:
-            print(f"   WARNING: mmd2doc timed out (120s) \u2014 skipping")
-
-        # Copy DOCUMENTATION.html and log files to distrib/
-        doc_artifacts = [
-            ("DOCUMENTATION.html", False),
-            ("DOCUMENTATION.log", False),
-        ]
-        for name, is_dir in doc_artifacts:
-            src = SCRIPT_DIR / name
-            dst = DISTRIB_DIR / name
-            if src.exists():
-                shutil.copy2(src, dst)
-                sz = dst.stat().st_size / 1024
-                print(f"   {name} ({sz:,.0f} KB)")
-            else:
-                print(f"   {name} not found \u2014 skipping")
-
-        # Copy mrs/ folder if it exists
-        mrs_src = SCRIPT_DIR / "mrs"
-        mrs_dst = DISTRIB_DIR / "mrs"
-        if mrs_src.is_dir():
-            if mrs_dst.exists():
-                shutil.rmtree(mrs_dst)
-            shutil.copytree(mrs_src, mrs_dst)
-            n_files = sum(1 for _ in mrs_dst.rglob("*") if _.is_file())
-            print(f"   mrs/ ({n_files} files)")
-        else:
-            print(f"   mrs/ not found \u2014 skipping")
-    else:
-        print(f"   WARNING: {doc_md} not found \u2014 skipping")
-
-    # Summary
-    print(f"\n{'=' * 60}")
-    print(f"  Traces embedded:    {len(all_traces)}")
-    print(f"  Constants:          {constant_names}")
-    print(f"  Server bundle:      server.zip ({zip_kb:,.0f} KB)")
-    print(f"  Documentation:      DOCUMENTATION.html")
-    print(f"  Output:             {OUTPUT_HTML.resolve()}")
-    print(f"{'=' * 60}")
-    print(f"\nDeploy:  cp -r -v {DISTRIB_DIR}/* <destination>/")
-    print(f"View:    python -m http.server {args.port} -d {DISTRIB_DIR}")
-    print(f"         then open http://localhost:{args.port}")
-
-    if args.serve:
-        import os
-        os.chdir(str(DISTRIB_DIR))
-        print(f"\nServing at http://localhost:{args.port}  (Ctrl+C to stop)")
-        httpd = HTTPServer(("", args.port), SimpleHTTPRequestHandler)
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nShutdown.")
-
-
-if __name__ == "__main__":
-    main()

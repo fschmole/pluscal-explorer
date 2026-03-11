@@ -92,14 +92,20 @@ def cmd_sweep(config: PcalConfig, config_path: Path, args: argparse.Namespace) -
 
             try:
                 result = tlc_sweep.run_single_combo(config, combo_d, model_dir)
-                if result is not None:
+                if result is not None and not result.get("error"):
                     success_count += 1
                     all_results[tag] = result
                     n_msgs = len(result.get("trace", []))
                     print(f"PASS  ({n_msgs} msgs)")
+                elif result is not None and result.get("error"):
+                    fail_count += 1
+                    all_results[tag] = result
+                    n_msgs = len(result.get("trace", []))
+                    err_info = result.get("error_info", "TLC error")
+                    print(f"FAIL  (counterexample: {n_msgs} msgs \u2014 {err_info})")
                 else:
                     fail_count += 1
-                    print("FAIL")
+                    print("FAIL (TLC error, no result)")
             except Exception as e:
                 fail_count += 1
                 print(f"ERROR: {e}")
@@ -118,11 +124,15 @@ def cmd_sweep(config: PcalConfig, config_path: Path, args: argparse.Namespace) -
         aliases[tag] = canonical[sig]
 
     unique_tags = set(canonical.values())
-    print(f"[sweep] {len(all_results)} passing -> {len(unique_tags)} unique traces")
+    n_passing = sum(1 for t, d in all_results.items() if not d.get("error"))
+    n_failing = sum(1 for t, d in all_results.items() if d.get("error"))
+    print(f"[sweep] {n_passing} passing -> {len([t for t in unique_tags if not all_results[t].get('error')])} unique traces"
+          + (f", {n_failing} failing with counterexamples" if n_failing else ""))
 
     for tag in unique_tags:
         data = all_results[tag]
-        puml_text = tlc_sweep.trace_data_to_puml(data)
+        error_info = data.get("error_info") if data.get("error") else None
+        puml_text = tlc_sweep.trace_data_to_puml(data, error_info=error_info)
         (traces_dir / f"{tag}.puml").write_text(puml_text, encoding="utf-8")
 
     (traces_dir / "_aliases.json").write_text(
@@ -267,7 +277,7 @@ def _unc_to_https(webdav_path: str) -> str | None:
     parts = p.split("/")
     if len(parts) < 2:
         return None
-    host_part = parts[0]           # e.g. "docs.intel.com@SSL"
+    host_part = parts[0]           # e.g. "docs.none.com@SSL"
     host = host_part.split("@")[0] # strip @SSL
     # Skip "DavWWWRoot" if present
     rest_parts = parts[1:]
